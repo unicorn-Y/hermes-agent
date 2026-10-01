@@ -70,7 +70,8 @@ dependencies = [
   # pydantic-core 2.41.5 (pulled by 2.12.5) segfaults when the OpenAI SDK's
   # Responses API resource is exercised from a non-main thread, which is the
   # codex_responses dispatch in agent/chat_completion_helpers.py:_call.
-  "pydantic==2.13.4; python_version >= '3.14'",
+  # Atlas browser-use currently pins 2.13.5; match that compatible patch release.
+  "pydantic==2.13.5; python_version >= '3.14'",
   # Interactive CLI (prompt_toolkit is used directly by cli.py)
   "prompt_toolkit==3.0.52; python_version >= '3.14'",
   # Cron scheduler (built-in feature — scheduled cron/interval jobs use croniter).
