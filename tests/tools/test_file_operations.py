@@ -849,3 +849,33 @@ def test_native_write_preserves_text_encoding_bom_and_crlf(tmp_path, encoding, b
     )
     assert written.error is None
     assert target.read_bytes() == bom + "before\r\nMálaga 東京 new value\r\nafter\r\n".encode(encoding)
+
+
+@pytest.mark.parametrize("encoding,bom", [
+    ("utf-16-le", b"\xff\xfe"),
+    ("utf-16-be", b"\xfe\xff"),
+])
+@pytest.mark.parametrize("pre_content_supplied", [False, True])
+def test_native_write_sample_boundary_inside_utf16_emoji(
+    tmp_path, encoding, bom, pre_content_supplied,
+):
+    """A bounded line-ending sample may end between an emoji's UTF-16 surrogates."""
+    ops = ShellFileOperations(make_real_subprocess_env(str(tmp_path)))
+    target = tmp_path / "powershell-output.txt"
+    # The initial CRLF lets the bounded sample infer line endings before its
+    # final UTF-16 code unit cuts through the emoji's surrogate pair.
+    prefix = "x\r\n" + "a" * 2044
+    old_text = prefix + "😀\r\nold\r\n"
+    target.write_bytes(bom + old_text.encode(encoding))
+    read = ops.read_file(str(target))
+    assert read.error is None
+    assert "old" in read.content
+
+    new_text = prefix + "😀\nnew\n"
+    result = ops.write_file(
+        str(target), new_text,
+        pre_content=old_text if pre_content_supplied else None,
+    )
+    assert result.error is None
+    expected = prefix + "😀\r\nnew\r\n"
+    assert target.read_bytes() == bom + expected.encode(encoding)

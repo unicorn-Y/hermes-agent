@@ -1433,7 +1433,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             body_bytes = self._decode_base64_sample(body)
             if body_bytes is not None:
                 if encoding in {"utf-16-le", "utf-16-be"}:
-                    decoded = body_bytes.decode(encoding, "surrogateescape")
+                    decode_errors = "replace" if body_mode == "sample" else "surrogateescape"
+                    decoded = body_bytes.decode(encoding, decode_errors)
                     if decoded.startswith("\ufeff"):
                         decoded = decoded[1:]
                 else:
