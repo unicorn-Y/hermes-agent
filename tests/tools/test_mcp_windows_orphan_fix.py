@@ -14,6 +14,8 @@ verify it is invoked on the Windows spawn path and not on POSIX, plus the
 best-effort contract of the tree-kill helpers.
 """
 
+import signal
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -95,6 +97,7 @@ class TestWindowsTreeKillHelpers:
         # exercises the helper directly without patching os.name, which breaks pathlib.)
         lifecycle._kill_windows_process_tree(999999999, 15)
 
+    @pytest.mark.platforms("posix")
     def test_tree_kill_terminates_descendants(self, monkeypatch):
         import tools.mcp_tool_lifecycle as lifecycle
 
@@ -117,7 +120,7 @@ class TestWindowsTreeKillHelpers:
         fake_psutil = MagicMock()
         fake_psutil.Process = FakeProc
         fake_psutil.wait_procs = lambda procs, timeout: ([], [])  # all exited gracefully
-        monkeypatch.setitem(__import__("sys").modules, "psutil", fake_psutil)
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
 
         lifecycle._kill_windows_process_tree(1, 15)
         # SIGTERM pass: descendants only — the direct child was already signalled by the caller.
@@ -127,6 +130,39 @@ class TestWindowsTreeKillHelpers:
         # Force pass: survivors of the wait are killed. wait_procs reports everyone alive.
         fake_psutil.wait_procs = lambda procs, timeout: ([], list(procs))
         lifecycle._kill_windows_process_tree(1, 9)
+        assert sorted(killed) == [2, 3]
+
+    @pytest.mark.platforms("windows")
+    def test_windows_tree_kill_uses_native_signal_fallback(self, monkeypatch):
+        import tools.mcp_tool_lifecycle as lifecycle
+
+        terminated = []
+        killed = []
+
+        class FakeProc:
+            def __init__(self, pid):
+                self.pid = pid
+
+            def children(self, recursive=True):
+                return [FakeProc(2), FakeProc(3)]
+
+            def terminate(self):
+                terminated.append(self.pid)
+
+            def kill(self):
+                killed.append(self.pid)
+
+        fake_psutil = MagicMock()
+        fake_psutil.Process = FakeProc
+        fake_psutil.wait_procs = lambda procs, timeout: ([], list(procs))
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+        # Python on Windows has no SIGKILL, so the cleanup caller's force-pass
+        # value falls back to SIGTERM and the helper's Windows branch kills the
+        # descendants returned as still alive.
+        lifecycle._kill_windows_process_tree(1, signal.SIGTERM)
+
+        assert sorted(terminated) == [2, 3]
         assert sorted(killed) == [2, 3]
 
     def test_ledger_tree_kill_helper_swallows_errors(self):
