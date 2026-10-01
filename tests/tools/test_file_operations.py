@@ -803,3 +803,49 @@ class TestEscapeNativeToolArg:
         assert node_cmds, f"no node command captured in: {commands}"
         assert "'C:/Users/alice/app/main.js'" in node_cmds[0]
         assert "/c/Users" not in node_cmds[0]
+@pytest.mark.parametrize(
+    ("encoding", "bom"),
+    [
+        ("utf-8", b"\xef\xbb\xbf"),
+        ("utf-16-le", b"\xff\xfe"),
+        ("utf-16-be", b"\xfe\xff"),
+    ],
+)
+def test_native_patch_preserves_text_encoding_bom_and_crlf(tmp_path, encoding, bom):
+    """Windows text edits keep PowerShell/Notepad BOM encodings byte-compatible."""
+    ops = ShellFileOperations(make_real_subprocess_env(str(tmp_path)))
+    target = tmp_path / "powershell-output.txt"
+    original = "before\r\nMálaga 東京 old value\r\nafter\r\n"
+    target.write_bytes(bom + original.encode(encoding))
+
+    read = ops.read_file(str(target))
+    assert read.error is None
+    assert "Málaga 東京 old value" in read.content
+    patched = ops.patch_replace(str(target), "old value", "new value")
+    assert patched.error is None
+    assert target.read_bytes() == bom + "before\r\nMálaga 東京 new value\r\nafter\r\n".encode(encoding)
+
+
+@pytest.mark.parametrize(
+    ("encoding", "bom"),
+    [
+        ("utf-8", b"\xef\xbb\xbf"),
+        ("utf-16-le", b"\xff\xfe"),
+        ("utf-16-be", b"\xfe\xff"),
+    ],
+)
+def test_native_write_preserves_text_encoding_bom_and_crlf(tmp_path, encoding, bom):
+    """Full-content edits preserve the encoding of existing BOM-marked text."""
+    ops = ShellFileOperations(make_real_subprocess_env(str(tmp_path)))
+    target = tmp_path / "powershell-output.txt"
+    original = "before\r\nMálaga 東京 old value\r\nafter\r\n"
+    target.write_bytes(bom + original.encode(encoding))
+
+    read = ops.read_file(str(target))
+    assert read.error is None
+    assert "Málaga 東京 old value" in read.content
+    written = ops.write_file(
+        str(target), "before\nMálaga 東京 new value\nafter\n",
+    )
+    assert written.error is None
+    assert target.read_bytes() == bom + "before\r\nMálaga 東京 new value\r\nafter\r\n".encode(encoding)

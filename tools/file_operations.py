@@ -587,12 +587,29 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             "trap - EXIT")
         return self._exec(script, stdin_data=content)
 
-    def _file_has_bom(self, path: str, pre_content: Optional[str] = None) -> bool:
-        """Whether the on-disk file starts with a UTF-8 BOM. ALWAYS probes disk:
-        ``pre_content`` usually comes from ``read_file_raw``, which strips BOMs, so
-        trusting it would silently drop the marker on rewrite. Missing → False."""
-        head_result = self._head(path, 3)
-        return head_result.exit_code == 0 and _has_bom(head_result.stdout)
+    @staticmethod
+    def _encoding_from_prefix(prefix: bytes) -> str:
+        if prefix.startswith(bytes((0xff, 0xfe))):
+            return "utf-16-le"
+        if prefix.startswith(bytes((0xfe, 0xff))):
+            return "utf-16-be"
+        return "utf-8"
+
+    def _read_prefix_bytes(self, path: str, size: int) -> bytes:
+        arg = self._escape_shell_arg(path)
+        result = self._exec(f"head -c {int(size)} {arg} 2>/dev/null | base64 2>/dev/null")
+        sample = self._decode_base64_sample(result.stdout or "") if result.exit_code == 0 else None
+        return sample or b""
+
+    def _utf16_line_ending(self, path: str, encoding: str) -> Optional[str]:
+        """Read a bounded byte sample so NUL-interleaved UTF-16 keeps its EOL."""
+        sample = self._read_prefix_bytes(path, 4096)
+        if not sample:
+            return None
+        text = sample.decode(encoding, "replace")
+        if text.startswith("\ufeff"):
+            text = text[1:]
+        return _detect_line_ending(text)
 
     def _unified_diff(self, old_content: str, new_content: str, filename: str) -> str:
         return ''.join(difflib.unified_diff(
@@ -766,7 +783,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         end_line = offset + limit - 1
         truncated = total_lines > end_line
         hint_parts = [f"Transcoded from {encoding.upper()} to UTF-8 for display. "
-                      "Text edits via patch/write_file would re-encode as UTF-8."]
+                      "Text edits preserve the source encoding, BOM, and line endings."]
         if truncated:
             hint_parts.append(
                 f"Use offset={end_line + 1} to continue reading "
@@ -1354,9 +1371,9 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         FIFO/device never reaches ``head``/``cat``; a missing path echoes ``MISSING_SENTINEL``."""
         arg = self._escape_shell_arg(path)
         if body == "cat":
-            body_cmd = f"cat {arg} 2>/dev/null"
+            body_cmd = f"base64 < {arg} 2>/dev/null"
         elif body == "sample":
-            body_cmd = f"head -c 4096 {arg} 2>/dev/null"
+            body_cmd = f"head -c 4096 {arg} 2>/dev/null | base64 2>/dev/null"
         else:
             body_cmd = ":"
         return (
@@ -1366,13 +1383,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             f"else echo {MISSING_SENTINEL}; fi")
 
     def _probe_write_target(self, path: str, pre_content: Optional[str], want_pre: bool,
-                            ) -> tuple[bool, Optional[str], Optional[str]]:
-        """``(has_bom, pre_content, original_line_ending)`` for ``path`` in ONE
-        round-trip (replaces ``cat`` when pre-content is wanted, a ``head -c 4096``
-        line-ending sample and a ``head -c 3`` BOM check). Semantics unchanged:
-        pre-content is read only when wanted and not supplied; the line ending comes
-        from pre-content when there is any, else from the sample; the BOM always comes
-        from disk. An unparseable reply falls back to the separate probes."""
+                            ) -> tuple[str, bool, Optional[str], Optional[str]]:
+        """Return encoding/BOM metadata, optional pre-content and line ending in one
+        round-trip. Binary samples travel as base64 so UTF-16 bytes survive the
+        Windows subprocess transport without replacement decoding."""
         if want_pre and pre_content is None:
             body_mode: Optional[str] = "cat"
         elif not pre_content:
@@ -1386,7 +1400,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         if sentinel not in output:
             if _strip_terminal_fence_leaks(output).strip() == MISSING_SENTINEL:
                 ending = _detect_line_ending(pre_content) if pre_content else None
-                return False, pre_content, ending
+                return "utf-8", False, pre_content, ending
             logger.debug(
                 "write_file: pre-write probe reply for %s has no sentinel "
                 "(exit %s, %d chars); falling back to sequential probes",
@@ -1408,35 +1422,59 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             logger.debug(
                 "write_file: no usable base64 head for %s; paying one extra "
                 "round-trip for the BOM probe", path)
-            has_bom = self._file_has_bom(path, pre_content)
-        else:
-            has_bom = head_bytes.startswith(_UTF8_BOM.encode("utf-8"))
+            head_bytes = self._read_prefix_bytes(path, 3)
+        encoding = self._encoding_from_prefix(head_bytes)
+        has_bom = head_bytes.startswith(
+            (bytes((0xff, 0xfe)), bytes((0xfe, 0xff)), _UTF8_BOM.encode("utf-8"))
+        )
 
-        if body_mode == "cat" and body:
-            pre_content = body
+        sample_content = None
+        if body_mode in {"cat", "sample"} and body:
+            body_bytes = self._decode_base64_sample(body)
+            if body_bytes is not None:
+                if encoding in {"utf-16-le", "utf-16-be"}:
+                    decoded = body_bytes.decode(encoding, "surrogateescape")
+                    if decoded.startswith("\ufeff"):
+                        decoded = decoded[1:]
+                else:
+                    decoded = body_bytes.decode("utf-8", "surrogateescape")
+                if body_mode == "cat":
+                    pre_content = decoded
+                else:
+                    sample_content = decoded
         if pre_content:
             ending = _detect_line_ending(pre_content)
-        elif body_mode == "sample" and body:
-            ending = _detect_line_ending(body)
+        elif sample_content:
+            ending = _detect_line_ending(sample_content)
         else:
             ending = None
-        return has_bom, pre_content, ending
+        return encoding, has_bom, pre_content, ending
 
     def _probe_write_target_sequential(self, path: str, pre_content: Optional[str], want_pre: bool,
-                                       ) -> tuple[bool, Optional[str], Optional[str]]:
+                                       ) -> tuple[str, bool, Optional[str], Optional[str]]:
         """Pre-compound form of ``_probe_write_target``: one exec per question. A
-        failed ``cat`` leaves pre_content None so the lint-delta and LSP consumers
+        failed byte read leaves pre_content None so the lint-delta and LSP consumers
         degrade gracefully."""
+        prefix = self._read_prefix_bytes(path, 3)
+        encoding = self._encoding_from_prefix(prefix)
+        has_bom = prefix.startswith(
+            (bytes((0xff, 0xfe)), bytes((0xfe, 0xff)), _UTF8_BOM.encode("utf-8"))
+        )
         if want_pre and pre_content is None:
-            read_result = self._cat(path)
-            if read_result.exit_code == 0 and read_result.stdout:
-                pre_content = read_result.stdout
+            raw, _error = self._read_exact_bytes(path)
+            if raw is not None:
+                if encoding in {"utf-16-le", "utf-16-be"}:
+                    pre_content = raw[2:].decode(encoding, "surrogateescape")
+                else:
+                    pre_content = raw.decode("utf-8", "surrogateescape")
         if pre_content:
             ending = _detect_line_ending(pre_content)
         else:
             head = self._head(path, 4096)
             ending = _detect_line_ending(head.stdout) if head.exit_code == 0 and head.stdout else None
-        return self._file_has_bom(path, pre_content), pre_content, ending
+            if encoding in {"utf-16-le", "utf-16-be"} and ending is None:
+                ending = self._utf16_line_ending(path, encoding)
+        return encoding, has_bom, pre_content, ending
 
     def _verify_written_hash(self, path: str, content_bytes: bytes) -> tuple[Optional[bool], Optional[WriteResult]]:
         """Compare the on-disk sha256 to the intended bytes: ``(verified, error)``.
@@ -1483,13 +1521,24 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         # Pre-content is read only for extensions in the UNION of in-process lint and
         # LSP coverage (keeps the hot path fast for binaries).
         want_pre = ext in LINTERS_INPROC or self._lsp_handles_extension(ext)
-        has_bom, pre_content, original_ending = self._probe_write_target(path, pre_content, want_pre)
+        encoding, has_bom, pre_content, original_ending = self._probe_write_target(
+            path, pre_content, want_pre,
+        )
         # read_file strips the BOM and models send bare-LF text, so a round-trip would
         # otherwise normalize CRLF files and drop the BOM (prepend only when absent).
         if original_ending == "\r\n":
             content = _normalize_line_endings(content, "\r\n")
-        if has_bom and not _has_bom(content):
-            content = _UTF8_BOM + content
+        if encoding == "utf-16-le":
+            text = content[1:] if content.startswith("\ufeff") else content
+            content_bytes = bytes((0xff, 0xfe)) + text.encode("utf-16-le", "surrogatepass")
+        elif encoding == "utf-16-be":
+            text = content[1:] if content.startswith("\ufeff") else content
+            content_bytes = bytes((0xfe, 0xff)) + text.encode("utf-16-be", "surrogatepass")
+        else:
+            if has_bom and not _has_bom(content):
+                content = _UTF8_BOM + content
+            content_bytes = content.encode("utf-8", "surrogateescape")
+        atomic_content = content_bytes.decode("utf-8", "surrogateescape")
         # Best-effort snapshot so the LSP tier reports only this edit's diagnostics.
         self._snapshot_lsp_baseline(path)
         # ``dirs_created`` means "parent dirs ensured" (mkdir -p is folded into
@@ -1498,8 +1547,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         # surrogateescape is the exact inverse of the decode that may have produced
         # this content, so these are the bytes on disk; the early rejection above
         # guarantees this cannot raise.
-        content_bytes = content.encode("utf-8", "surrogateescape")
-        write_result = self._atomic_write(path, content)
+        write_result = self._atomic_write(path, atomic_content)
         if write_result.exit_code != 0:
             return WriteResult(error=f"Failed to write file: {write_result.stdout}")
         content_verified, verify_error = self._verify_written_hash(path, content_bytes)
@@ -1549,7 +1597,12 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         data, _failed = self._read_exact_bytes(path)
         if data is None:
             return PatchResult(error=f"Post-write verification failed: could not re-read {path}")
-        bomless, _ = _strip_bom(data.decode("utf-8", "surrogateescape"))
+        if data.startswith(bytes((0xff, 0xfe))):
+            bomless = data[2:].decode("utf-16-le", "surrogateescape")
+        elif data.startswith(bytes((0xfe, 0xff))):
+            bomless = data[2:].decode("utf-16-be", "surrogateescape")
+        else:
+            bomless, _ = _strip_bom(data.decode("utf-8", "surrogateescape"))
         on_disk = bomless.replace("\r\n", "\n").replace("\r", "\n")
         intended = new_content.replace("\r\n", "\n").replace("\r", "\n")
         if on_disk != intended:
@@ -1572,12 +1625,19 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         data, failed = self._read_exact_bytes(path)
         if data is None:
             return PatchResult(error=failed.cwd_error or f"Failed to read file: {path}")
-        # Every line the replacement does not touch is written back, so read the exact bytes;
-        # surrogateescape lets write_file restore any byte UTF-8 cannot decode (#79178).
+        # Every line the replacement does not touch is written back, so read the exact bytes.
         # Match and diff on BOM-stripped content (a phantom U+FEFF defeats an exact
-        # first-line match); the raw read becomes write_file's pre_content.
-        raw_content = data.decode("utf-8", "surrogateescape")
-        content, _ = _strip_bom(raw_content)
+        # first-line match); decoded text becomes write_file's lint baseline.
+        if data.startswith(bytes((0xff, 0xfe))):
+            encoding = "utf-16-le"
+            content = data[2:].decode(encoding, "surrogateescape")
+        elif data.startswith(bytes((0xfe, 0xff))):
+            encoding = "utf-16-be"
+            content = data[2:].decode(encoding, "surrogateescape")
+        else:
+            encoding = "utf-8"
+            raw_content = data.decode("utf-8", "surrogateescape")
+            content, _ = _strip_bom(raw_content)
 
         from tools.fuzzy_match import fuzzy_find_and_replace
         new_content, match_count, _strategy, error = fuzzy_find_and_replace(
@@ -1589,7 +1649,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         file_ending = _detect_line_ending(content)
         if file_ending:
             new_content = _normalize_line_endings(new_content, file_ending)
-        write_result = self.write_file(path, new_content, pre_content=raw_content)
+        write_result = self.write_file(path, new_content, pre_content=content)
         if write_result.error:
             return PatchResult(error=f"Failed to write changes: {write_result.error}")
         verify_error = self._verify_patch_persisted(path, new_content)
