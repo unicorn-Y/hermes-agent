@@ -253,18 +253,32 @@ def _file_metadata(resolved: str) -> tuple | None:
 def _file_version(resolved: str) -> tuple | None:
     """A byte snapshot, not just mtime (editors/copy tools can preserve that)."""
     try:
-        if not stat.S_ISREG(os.stat(resolved).st_mode):
+        before = os.stat(resolved)
+        if not stat.S_ISREG(before.st_mode):
             return None
         fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
         with os.fdopen(fd, "rb") as stream:
-            before = os.fstat(stream.fileno())
-            if not stat.S_ISREG(before.st_mode):
+            handle = os.fstat(stream.fileno())
+            if not stat.S_ISREG(handle.st_mode):
+                return None
+            # Windows can report a different st_ctime_ns on fstat(handle) than
+            # stat(path), even while the path metadata is stable (for example
+            # immediately after atomic replacement). Compare the open handle's
+            # identity, size and mtime to the pre-read path; compare the full
+            # path metadata, including ctime, before and after hashing below.
+            handle_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+            if tuple(getattr(handle, name) for name in handle_fields) != tuple(
+                    getattr(before, name) for name in handle_fields):
                 return None
             digest = hashlib.file_digest(stream, "sha256").digest()
+            handle_after = os.fstat(stream.fileno())
             after = os.stat(resolved)
-        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        version = tuple(getattr(before, name) for name in fields)
-        if version == tuple(getattr(after, name) for name in fields):
+        path_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        version = tuple(getattr(before, name) for name in path_fields)
+        handle_version_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        handle_version = tuple(getattr(handle, name) for name in handle_version_fields)
+        if (version == tuple(getattr(after, name) for name in path_fields)
+                and handle_version == tuple(getattr(handle_after, name) for name in handle_version_fields)):
             return (*version, digest)
         return None
     except OSError:
