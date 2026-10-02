@@ -1634,6 +1634,9 @@ def _run_conversation_turn(
         s.active_system_prompt = _sync_failover_system_message(agent, None, s.active_system_prompt)
 
     while (s.api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+        atlas_before_model_request = getattr(agent, "_atlas_before_model_request", None)
+        if callable(atlas_before_model_request) and atlas_before_model_request():
+            agent.interrupt(hard_cancel=True)
         if _run_phase(begin_iteration, agent, s).action == "break":
             break
         _run_phase(prepare_iteration, agent, s)
