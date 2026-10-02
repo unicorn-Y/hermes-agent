@@ -258,6 +258,57 @@ def _strategy_block_anchor(content: str, pattern: str) -> list[Span]:
     return _window_spans(content, content.split('\n'), n, similar)
 
 
+def _strategy_block_anchor_variable_size(content: str, pattern: str) -> list[Span]:
+    """OpenCode-style anchored blocks allowing a small middle-line count drift."""
+    pattern_lines = _unicode_normalize(pattern).split('\n')
+    if len(pattern_lines) < 3:
+        return []
+    if pattern_lines[-1] == "":
+        pattern_lines.pop()
+    content_lines = _unicode_normalize(content).split('\n')
+    original_lines = content.split('\n')
+    first, last = pattern_lines[0].strip(), pattern_lines[-1].strip()
+    expected = len(pattern_lines)
+    max_delta = max(1, int(expected * 0.25))
+    candidates: list[tuple[int, int]] = []
+    for start, line in enumerate(content_lines):
+        if line.strip() != first:
+            continue
+        for end in range(start + 2, len(content_lines)):
+            if content_lines[end].strip() == last:
+                if abs((end - start + 1) - expected) <= max_delta:
+                    candidates.append((start, end))
+                break
+    if not candidates:
+        return []
+
+    # Keep all qualifying spans. The caller rejects multiple matches instead of
+    # selecting whichever candidate happens to score highest.
+    spans: list[Span] = []
+    for start, end in candidates:
+        actual_size = end - start + 1
+        middle_pairs = min(expected - 2, actual_size - 2)
+        if middle_pairs:
+            scores = [
+                SequenceMatcher(
+                    None,
+                    original_lines[start + index].strip(),
+                    pattern_lines[index].strip(),
+                ).ratio()
+                for index in range(1, min(expected - 1, actual_size - 1))
+            ]
+            similarity = sum(scores) / len(scores)
+        else:
+            similarity = 1.0
+        threshold = 0.65
+        if similarity < threshold:
+            continue
+        start_pos = sum(len(line) + 1 for line in original_lines[:start])
+        end_pos = start_pos + sum(len(line) + 1 for line in original_lines[start:end + 1]) - 1
+        spans.append((start_pos, min(len(content), end_pos)))
+    return spans
+
+
 def _strategy_context_aware(content: str, pattern: str) -> list[Span]:
     """Strategy 9 (last resort): anchored per-line similarity, every non-blank line >= 0.80.
     The anchor pre-filter bounds the scan; the all-lines rule stops coincidental matches."""
@@ -295,11 +346,12 @@ STRATEGIES: list[tuple[str, Callable[[str, str], list[Span]]]] = [
     ("trimmed_boundary", _strategy_trimmed_boundary),
     ("unicode_normalized", _strategy_unicode_normalized),
     ("block_anchor", _strategy_block_anchor),
+    ("block_anchor_variable_size", _strategy_block_anchor_variable_size),
     ("context_aware", _strategy_context_aware)]
 
 # Matches from these only *approximately* resemble old_string — fine for one
 # unique replacement, never safe under replace_all.
-SIMILARITY_STRATEGIES = frozenset({"block_anchor", "context_aware"})
+SIMILARITY_STRATEGIES = frozenset({"block_anchor", "block_anchor_variable_size", "context_aware"})
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────

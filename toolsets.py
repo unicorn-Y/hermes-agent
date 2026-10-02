@@ -25,7 +25,7 @@ _HERMES_CORE_TOOLS = [
     "todo_list", "memory",
     "session_search",
     "clarify",
-    "execute_code", "delegate_task",
+    "execute_code", "delegate_task", "new_context_window",
     "cronjob_manage",
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     "kanban_show", "kanban_list",

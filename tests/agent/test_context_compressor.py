@@ -26,6 +26,20 @@ from agent.auxiliary_client import CODEX_STREAM_STALL_MARKER
 _REQ = httpx.Request("POST", "http://x")
 
 
+def test_summary_template_has_fixed_handoff_fields():
+    template = ContextCompressor._summary_template_sections(
+        {"historical_task": "Current task", "goal": "Goal", "constraints": "Constraints",
+         "resolved_questions": "Resolved questions"},
+        1000,
+        "",
+    )
+    for heading in (
+        "## Goal", "## Constraints & Preferences", "## Completed Actions", "## Active State",
+        "## Blocked", "## Key Decisions", "## Next Steps", "## Relevant Files",
+    ):
+        assert heading in template
+
+
 class StubProviderError(Exception):
     def __init__(self, message, *, status_code=None, response=None):
         super().__init__(message)

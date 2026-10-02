@@ -617,8 +617,11 @@ def _without_execute_code_metadata(parsed: Any) -> Any:
     return cleaned
 
 
-def _result_hash(result: str | None, tool_name: str = "") -> str:
-    parsed = safe_json_loads(result or "")
+def _result_hash(result: Any, tool_name: str = "") -> str:
+    if isinstance(result, dict):
+        parsed = result
+    else:
+        parsed = safe_json_loads(result or "")
     if parsed is None:
         return _sha256(result or "")
     if tool_name == "execute_code":
@@ -654,7 +657,9 @@ def _subagent_spawn_count(args: Mapping[str, Any]) -> int:
     return len(tasks) if isinstance(tasks, list) and tasks else 1
 
 
-def _sha256(value: str) -> str:
+def _sha256(value: Any) -> str:
     # surrogatepass: web-scraped results can carry unpaired UTF-16 surrogates; a
     # strict encode would raise and take down the conversation loop.
+    if not isinstance(value, str):
+        value = _canonical_json(value)
     return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()

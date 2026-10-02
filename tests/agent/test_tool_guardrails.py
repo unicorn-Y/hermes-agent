@@ -8,6 +8,7 @@ from agent.tool_guardrails import (
     ToolCallSignature,
     canonical_tool_args,
     classify_tool_failure,
+    _result_hash,
 )
 
 
@@ -31,6 +32,18 @@ def test_tool_call_signature_hashes_canonical_nested_unicode_args_without_exposi
     assert metadata == {"tool_name": "web_search", "args_hash": sig_a.args_hash}
     assert "secret-token-value" not in json.dumps(metadata)
     assert "☤" not in json.dumps(metadata)
+
+
+def test_tool_result_hash_accepts_multimodal_image_envelopes():
+    envelope = {
+        "_multimodal": True,
+        "content": [
+            {"type": "text", "text": "Read screenshot"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+        "text_summary": "Read screenshot",
+    }
+    assert _result_hash(envelope, "read_file") == _result_hash(dict(envelope), "read_file")
 
 
 

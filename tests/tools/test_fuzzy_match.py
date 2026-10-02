@@ -99,6 +99,15 @@ class TestIndentDifference:
         assert count == 1
         assert "bar" in new
 
+    def test_block_anchor_matches_a_variable_length_middle(self):
+        content = "def target():\n    first()\n    inserted()\n    last()\n"
+        old = "def target():\n    first()\n    last()"
+        new, count, strategy, err = fuzzy_find_and_replace(content, old, "def target():\n    changed()")
+        assert err is None
+        assert count == 1
+        assert strategy == "block_anchor_variable_size"
+        assert new == "def target():\n    changed()\n"
+
 
 class TestIndentationPreservation:
     """When a non-exact strategy matches, ``new_string`` should be re-indented

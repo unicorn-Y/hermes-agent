@@ -23,6 +23,26 @@ logger = logging.getLogger("agent.conversation_loop")
 _HOUSEKEEPING_TOOLS = frozenset({"memory", "todo_list", "skill_manage", "session_search"})
 
 
+def _apply_atlas_context_handoff(agent: Any, messages: list, stable_prompt: str) -> bool:
+    summary = getattr(agent, "_atlas_context_handoff_summary", None)
+    if not summary:
+        return False
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+
+    todos = agent._todo_store.read() if getattr(agent, "_todo_store", None) else []
+    handoff = {
+        "role": "user",
+        "content": (
+            "上下文交接摘要（继续同一项工作）：\n" + str(summary)
+            + "\n\n当前待办：\n" + str(todos)
+        ),
+        _DB_PERSISTED_MARKER: True,
+    }
+    messages[:] = [{"role": "system", "content": stable_prompt}, handoff]
+    agent._atlas_context_handoff_summary = None
+    return True
+
+
 @dataclass
 class ToolRoundVerdict:
     """``action``: ``"continue"`` (tools ran, next API call), ``"break"`` (turn ends:
@@ -163,6 +183,11 @@ def run_tool_round(
         final_response = ""
         failed = True
         return _verdict("break")
+
+    if _apply_atlas_context_handoff(agent, messages, active_system_prompt):
+        current_turn_user_idx = 1
+        agent._session_messages = messages
+        return _verdict("continue")
 
     if agent._tool_guardrail_halt_decision is not None:
         decision = agent._tool_guardrail_halt_decision

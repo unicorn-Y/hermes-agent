@@ -4114,6 +4114,9 @@ Be specific with file paths, commands, line numbers, and results.]
 ## Key Decisions
 [Important technical decisions and WHY they were made]
 
+## Next Steps
+[The immediate next actions needed to continue the current task, in order.]
+
 ## Errors & Fixes
 [Errors hit during the compacted turns and how each was resolved — include the
 exact error text. Pay special attention to corrections the USER gave; quote
