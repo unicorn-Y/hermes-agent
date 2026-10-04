@@ -24,7 +24,7 @@ _HOUSEKEEPING_TOOLS = frozenset({"memory", "todo_list", "skill_manage", "session
 
 
 def _apply_atlas_context_handoff(agent: Any, messages: list, stable_prompt: str) -> bool:
-    summary = getattr(agent, "_atlas_context_handoff_summary", None)
+    summary = getattr(agent, "context_handoff_summary", None)
     if not summary:
         return False
     from agent.context_compressor import _DB_PERSISTED_MARKER
@@ -39,7 +39,7 @@ def _apply_atlas_context_handoff(agent: Any, messages: list, stable_prompt: str)
         _DB_PERSISTED_MARKER: True,
     }
     messages[:] = [{"role": "system", "content": stable_prompt}, handoff]
-    agent._atlas_context_handoff_summary = None
+    agent.context_handoff_summary = None
     return True
 
 

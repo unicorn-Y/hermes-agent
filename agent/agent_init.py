@@ -2357,7 +2357,7 @@ _USAGE_STATE: Dict[str, Any] = {
 _PASSTHROUGH_PARAMS = (
     "model", "max_iterations", "save_trajectories", "verbose_logging", "quiet_mode",
     "tool_progress_mode", "ephemeral_system_prompt", "platform", "skip_context_files",
-    "load_soul_identity", "pass_session_id", "log_prefix_chars",
+    "load_soul_identity", "pass_session_id", "log_prefix_chars", "hooks", "identity",
     # OpenRouter provider preferences
     "providers_allowed", "providers_ignored", "providers_order", "provider_sort",
     "provider_require_parameters", "provider_data_collection", "openrouter_min_coding_score",
@@ -2422,6 +2422,7 @@ def init_agent(
     requested_provider: str = None, capabilities: Optional[Dict[str, bool]] = None, cwd: Optional[str] = None,
     side_agent: bool = False, memory_manager=None,
     tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
+    hooks=None, identity: str | None = None,
 ):
     _install_safe_stdio()
 

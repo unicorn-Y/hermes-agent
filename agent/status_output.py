@@ -32,12 +32,22 @@ class StatusOutputMixin:
     def _vprint(self, *args, force: bool = False, diagnostic: bool = False, **kwargs):
         """Verbose print — suppressed while tokens are streaming (allowed during tool execution) and after
         the main response; ``force=True`` bypasses both. ``suppress_status_output`` (``hermes chat -q``) wins."""
+        if diagnostic:
+            self._notify_diagnostic(" ".join(map(str, args)))
         if getattr(self, "suppress_status_output", False):
             return
         if diagnostic and not self._warning_presentation_enabled():
             return
         if force or not (getattr(self, "_mute_post_response", False) or (self._has_stream_consumers() and not self._executing_tools)):
             self._safe_print(*args, **kwargs)
+
+    def _notify_diagnostic(self, message: str) -> None:
+        callback = getattr(getattr(self, "hooks", None), "on_diagnostic", None)
+        if callable(callback):
+            try:
+                callback(message)
+            except Exception:
+                logger.debug("on_diagnostic hook failed", exc_info=True)
 
     def _should_start_quiet_spinner(self) -> bool:
         """True when quiet-mode spinner output has a safe sink (``_print_fn`` or a real TTY); a raw spinner
@@ -95,7 +105,9 @@ class StatusOutputMixin:
     def _emit_diagnostic_status(self, message: str) -> None:
         """A diagnostic on the lifecycle rail, without changing legacy formatting."""
         from gateway.warning_notifications import DiagnosticText
-        self._emit_status(DiagnosticText(message))
+        diagnostic = DiagnosticText(message)
+        self._notify_diagnostic(diagnostic)
+        self._emit_status(diagnostic)
 
     def _emit_status(self, message: str) -> None:
         """Emit a lifecycle status message (CLI + gateway ``status_callback``)."""
@@ -205,7 +217,9 @@ class StatusOutputMixin:
 
     def _buffer_diagnostic_status(self, message: str) -> None:
         from gateway.warning_notifications import DiagnosticText
-        self._buffer_status(DiagnosticText(message))
+        diagnostic = DiagnosticText(message)
+        self._notify_diagnostic(diagnostic)
+        self._buffer_status(diagnostic)
 
     def _buffer_vprint(self, message: str) -> None:
         self._buffer_retry_message("vprint", message)
