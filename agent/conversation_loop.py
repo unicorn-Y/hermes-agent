@@ -1498,6 +1498,12 @@ def _run_phase(fn, agent, state: _LoopState, **extra):
     return verdict
 
 
+def _before_model_request(agent) -> bool:
+    """Invoke the embedding application's public pre-request hook, if configured."""
+    callback = getattr(getattr(agent, "hooks", None), "before_model_request", None)
+    return bool(callback()) if callable(callback) else False
+
+
 def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
     """One API call with its retry/recovery loop (guard → build → call → check, error handlers).
 
@@ -1634,8 +1640,7 @@ def _run_conversation_turn(
         s.active_system_prompt = _sync_failover_system_message(agent, None, s.active_system_prompt)
 
     while (s.api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
-        atlas_before_model_request = getattr(agent, "_atlas_before_model_request", None)
-        if callable(atlas_before_model_request) and atlas_before_model_request():
+        if _before_model_request(agent):
             agent.interrupt(hard_cancel=True)
         if _run_phase(begin_iteration, agent, s).action == "break":
             break

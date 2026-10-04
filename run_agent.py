@@ -302,6 +302,7 @@ class AIAgent(
         capabilities: Dict[str, bool] | None = None, cwd: str | None = None,
         side_agent: bool = False, memory_manager=None,
         tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
+        hooks=None, identity: str | None = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``)."""
         init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "tool_delay")}
@@ -1128,6 +1129,10 @@ class AIAgent(
 
     _build_system_prompt = _forward("agent.system_prompt", "build_system_prompt")
 
+    def set_context_handoff_summary(self, summary: str | None) -> None:
+        """Set the summary that replaces prior messages at the next tool-round boundary."""
+        self.context_handoff_summary = str(summary) if summary else None
+
     # Call ID of a tool_call entry (dict or object); policy owner: ``message_sanitization.coalesce_tool_call_id``.
     _get_tool_call_id_static = staticmethod(_sanitize_coalesce_tool_call_id)
 
@@ -1365,6 +1370,9 @@ class AIAgent(
 
     def _dispatch_delegate_task(self, function_args: dict) -> str:
         """Single call site for delegate_task dispatch; new DELEGATE_TASK_SCHEMA fields are added only here."""
+        dispatcher = getattr(getattr(self, "hooks", None), "delegate_dispatcher", None)
+        if callable(dispatcher):
+            return dispatcher(function_args)
         from tools.delegate_tool import _strip_model_hidden_task_fields, delegate_task as _delegate_task
         # Top-level MODEL delegations always run in the background (handle returned, results re-enter as
         # messages). An ORCHESTRATOR SUBAGENT (depth > 0) stays synchronous — it needs results in-turn and

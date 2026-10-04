@@ -246,7 +246,10 @@ def _maybe_title_session_at_turn_start(
                 or getattr(agent, "_emit_auxiliary_failure", None)
             ),
             main_runtime=main_runtime,
-            title_callback=getattr(agent, "_on_session_title", None),
+            title_callback=(
+                getattr(getattr(agent, "hooks", None), "on_session_title", None)
+                or getattr(agent, "_on_session_title", None)
+            ),
             runtime_validator=lambda: (
                 getattr(agent, "model", None) == main_runtime["model"]
                 and getattr(agent, "provider", None) == main_runtime["provider"]
