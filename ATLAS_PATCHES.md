@@ -15,7 +15,7 @@ Defaults preserve Hermes behavior when the new public options are omitted.
 | `tools/file_tools_read_tracking.py` | Keep the full-read baseline valid after atomic replacement while detecting external content or metadata changes. | `tests/tools/test_known_file_write_baseline.py` |
 | `tools/fuzzy_match.py` | Match block anchors whose middle spans have different lengths. | `tests/tools/test_fuzzy_match.py::TestIndentDifference::test_block_anchor_matches_a_variable_length_middle` |
 | `tests/tools/test_mcp_windows_orphan_fix.py` | Separate Windows native tree-kill signal expectations from POSIX process-group behavior; production tree cleanup is inherited from upstream. | `tests/tools/test_mcp_windows_orphan_fix.py` |
-| `pyproject.toml` | Align OpenAI 2.26.0 and Pydantic 2.13.5 pins with Atlas browser-use dependencies on Python 3.14. | Atlas dependency-resolution check and `tests/agent/test_atlas_hooks.py` public-constructor integration |
+| `pyproject.toml` | Align OpenAI 2.26.0 and Pydantic 2.13.5 pins with Atlas browser-use dependencies on Python 3.14. | Installed package metadata compatibility check (browser-use 0.13.10 requires the same exact versions), plus `tests/agent/test_atlas_hooks.py` public-constructor integration |
 
 Inventory reviewed against upstream `c8301ea6c9` for the H1R closeout. Earlier
 patches absorbed into upstream are not additional fork deltas. The fixed-date
