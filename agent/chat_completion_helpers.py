@@ -3684,6 +3684,9 @@ class _StreamingCall(StreamingWaitMonitor):
         """Classify a failed attempt: True = retry; False = stop with
         ``result["error"]`` set (unless our own interrupt force-closed the
         socket). Runs inside the ``except`` so ``logger.exception`` works."""
+        if getattr(getattr(self.agent, "hooks", None), "disable_provider_retries", False):
+            self.result["error"] = e
+            return False
         import httpx as _httpx
         # Our own interrupt force-close: no retry/fallback/"reconnecting" (the
         # poll loop raises InterruptedError).
@@ -3850,6 +3853,8 @@ class _StreamingCall(StreamingWaitMonitor):
 
     def _call(self):
         _max_stream_retries = env_int("HERMES_STREAM_RETRIES", 2)
+        if getattr(getattr(self.agent, "hooks", None), "disable_provider_retries", False):
+            _max_stream_retries = 0
         # The one stream_options compatibility retry (#9705) is not a network retry and must not
         # consume the transient budget: on the last attempt (or HERMES_STREAM_RETRIES=0) the
         # handler returned True and the loop ended with neither a response nor an error set.

@@ -2855,6 +2855,11 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         self.last_prompt_tokens = self.last_completion_tokens = 0
         self._reset_real_usage_pairing()
         self.summary_model = summary_model_override or ""
+        self.summary_model_id = ""
+        self.summary_request_callback = None
+        self.summary_before_request = None
+        self.summary_after_request = None
+        self.summary_disable_provider_retries = False
         self._session_db: Any = None
         self._session_id: str = ""
         # Per-session state (also reset by /new, /reset and session end).
@@ -2862,6 +2867,15 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         # Terminal summary failures (access/quota, network, empty content, finish_reason=length): compress()
         # must ABORT and preserve the session regardless of abort_on_summary_failure (see _TERMINAL_SUMMARY_FAILURES).
         self._clear_terminal_summary_failures()
+
+    def set_summary_request_callback(
+        self, callback, *, before_request=None, after_request=None, disable_provider_retries=False,
+    ) -> None:
+        """Install optional host callbacks for compression request usage and budget gates."""
+        self.summary_request_callback = callback if callable(callback) else None
+        self.summary_before_request = before_request if callable(before_request) else None
+        self.summary_after_request = after_request if callable(after_request) else None
+        self.summary_disable_provider_retries = bool(disable_provider_retries)
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
@@ -3861,6 +3875,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             "main_runtime": {
                 "model": self.model, "provider": self.provider, "base_url": self.base_url, "api_key": self.api_key,
                 "api_mode": self.api_mode,
+                "disable_provider_retries": self.summary_disable_provider_retries,
             },
             "messages": [{"role": "user", "content": prompt}], "route_info": _aux_route,
             # NO max_tokens: Anthropic/NIM wires forward it and a hard cap truncates summaries
@@ -3868,6 +3883,14 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         }
         if self.summary_model:
             call_kwargs["model"] = self.summary_model
+            # An Atlas-selected independent compression model carries a full
+            # route, not only a model label. Explicit route credentials keep
+            # Hermes' auxiliary YAML defaults from redirecting it to the main
+            # endpoint/provider.
+            call_kwargs.update(
+                provider=self.provider, base_url=self.base_url,
+                api_key=self.api_key, api_mode=self.api_mode,
+            )
         # Pinned route (stall fallback) overrides task routing so the retry leaves the stalled backend.
         call_kwargs.update(_pinned_summary_call_kwargs())
         # Compression is atomic: protect the in-flight summary call from a mid-turn gateway interrupt.
@@ -3883,11 +3906,43 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             "Compression summary call dispatched: model=%s prompt_chars=%s prompt_build_ms=%s",
             self.summary_model or self.model, f"{len(prompt):,}", _latency_info["prompt_build_ms"],
         )
+        from agent.turn_usage import new_usage_request_id
+
+        request_id = new_usage_request_id()
+        estimate = estimate_messages_tokens_rough(call_kwargs["messages"])
+        guard = self.summary_before_request
+        if callable(guard) and guard(estimate, request_id):
+            raise RuntimeError("Run input-token budget reached; compression request was not sent.")
+        request_started = True
+        response = None
         try:
             # Compression is atomic: shield the summary call from gateway interrupts. Re-entrant.
             with aux_interrupt_protection():
                 response = call_llm(**call_kwargs)
+            from agent.turn_usage import report_auxiliary_usage
+
+            report_auxiliary_usage(
+                self.summary_request_callback, response, purpose="compression",
+                model=self.summary_model_id or self.summary_model or self.model,
+                provider=_aux_route.get("provider") or self.provider or "",
+                api_mode=self.api_mode,
+                wire_model=_aux_route.get("model") or self.summary_model or self.model,
+                request_id=request_id,
+            )
         finally:
+            if response is None:
+                from agent.turn_usage import report_auxiliary_usage
+
+                report_auxiliary_usage(
+                    self.summary_request_callback, None, purpose="compression",
+                    model=self.summary_model_id or self.summary_model or self.model,
+                    provider=_aux_route.get("provider") or self.provider or "",
+                    api_mode=self.api_mode,
+                    wire_model=_aux_route.get("model") or self.summary_model or self.model,
+                    request_id=request_id,
+                )
+            if request_started and callable(self.summary_after_request):
+                self.summary_after_request(request_id)
             route_known = bool(_aux_route.get("provider") and _aux_route.get("model"))
             _aux_model = _aux_route.get("model") or self.summary_model or self.model or ""
             # Remember the resolved model for the failure path: an ``auto`` route picks one per call

@@ -11,6 +11,7 @@ model/provider. Logger name stays ``agent.conversation_loop`` for caplog parity.
 from __future__ import annotations
 
 import logging
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, List
@@ -20,6 +21,31 @@ from agent.usage_anchor import capture_usage_anchor, set_usage_anchor
 from agent.usage_pricing import estimate_usage_cost, normalize_usage, with_served_service_tier
 
 logger = logging.getLogger("agent.conversation_loop")
+
+_CACHE_USAGE_PATHS = (
+    ("cache_read_input_tokens",), ("prompt_cache_hit_tokens",), ("cached_tokens",),
+    ("cache_creation_input_tokens",), ("cache_write_tokens",),
+    ("input_tokens_details", "cached_tokens"),
+    ("input_tokens_details", "cache_write_tokens"),
+    ("input_tokens_details", "cache_creation_tokens"),
+    ("prompt_tokens_details", "cached_tokens"),
+    ("prompt_tokens_details", "cache_write_tokens"),
+    ("prompt_tokens_details", "cache_creation_input_tokens"),
+)
+
+
+def cache_usage_field_paths(raw_usage: Any) -> list[str]:
+    """Return names of cache fields actually present, without retaining values."""
+    if not isinstance(raw_usage, dict):
+        return []
+    present = []
+    for path in _CACHE_USAGE_PATHS:
+        value: Any = raw_usage
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+        if value is not None:
+            present.append(".".join(path))
+    return present
 
 
 def _agent_session_source(agent: Any) -> str:
@@ -96,6 +122,23 @@ def record_response_usage(
             "API call #%d: model=%s provider=%s in=? out=? total=? latency=%.1fs usage=unavailable",
             agent.session_api_calls, agent.model, agent.provider or "unknown", api_duration,
         )
+        _notify_usage(agent, {
+            "request_id": getattr(agent, "_current_api_request_id", None) or uuid.uuid4().hex,
+            "purpose": getattr(agent, "_atlas_usage_purpose", "conversation"),
+            "model": getattr(agent, "model", ""),
+            "wire_model": getattr(agent, "model", ""),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "context_tokens": 0,
+            "cache_usage_fields": [],
+            "cache_usage_available": False,
+            "request_count": 1,
+            "usage_available": False,
+            # The request was sent; only its usage reporting went missing.
+            "request_sent": True,
+        })
         return ResponseUsageOutcome(compression_attempts=compression_attempts, rearmed=rearmed)
 
     canonical_usage = with_served_service_tier(
@@ -118,6 +161,25 @@ def record_response_usage(
         "cache_write_tokens": canonical_usage.cache_write_tokens,
         "reasoning_tokens": canonical_usage.reasoning_tokens,
     }
+    cache_fields = cache_usage_field_paths(aggregator_usage.raw_usage)
+    _notify_usage(agent, {
+        "request_id": getattr(agent, "_current_api_request_id", None) or uuid.uuid4().hex,
+        "purpose": getattr(agent, "_atlas_usage_purpose", "conversation"),
+        "model": agent.model,
+        "wire_model": getattr(agent, "model", ""),
+        "input_tokens": aggregator_usage.prompt_tokens,
+        "uncached_input_tokens": aggregator_usage.input_tokens,
+        "output_tokens": aggregator_usage.output_tokens,
+        "cached_input_tokens": aggregator_usage.cache_read_tokens,
+        "cache_write_tokens": aggregator_usage.cache_write_tokens,
+        "context_tokens": aggregator_usage.prompt_tokens,
+        "context_limit": compressor.context_length,
+        "cache_usage_fields": cache_fields,
+        "cache_usage_available": bool(cache_fields),
+        "request_count": 1,
+        "usage_available": True,
+        "request_sent": True,
+    })
     # Capture the boundary latch before update_from_response() consumes it: only the real
     # prompt count right after a compaction rearms the budget.
     _completed_compaction_pending = bool(
@@ -294,3 +356,69 @@ def record_response_usage(
             f"({hit_pct:.0f}% hit, {written:,} written)"
         )
     return ResponseUsageOutcome(compression_attempts=compression_attempts, rearmed=rearmed)
+
+
+def _notify_usage(agent: Any, usage: dict[str, Any]) -> None:
+    """Send one provider-request delta through the optional public embedding hook."""
+    callback = getattr(getattr(agent, "hooks", None), "on_usage", None)
+    if not callable(callback):
+        return
+    try:
+        callback(usage)
+    except Exception:
+        logger.warning("Usage observer callback failed", exc_info=True)
+
+
+def report_auxiliary_usage(
+    callback: Any, response: Any, *, purpose: str, model: str,
+    provider: str = "", api_mode: str = "", wire_model: str = "",
+    request_id: str | None = None,
+) -> tuple[dict[str, Any], Any] | None:
+    """Publish one auxiliary provider request using the same schema as main turns.
+
+    ``response is None`` marks a failed dispatch (usage failure report): the row
+    carries ``request_sent: False`` so a host budget can refund the reservation
+    instead of charging unknown usage for a request that provably never reached
+    a provider.
+    """
+    raw = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    row = {
+        "request_id": request_id or uuid.uuid4().hex,
+        "purpose": purpose,
+        "model": model,
+        "wire_model": wire_model or model,
+        "request_count": 1,
+        "usage_available": bool(raw),
+        "request_sent": response is not None,
+        "input_tokens": 0,
+        "uncached_input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_write_tokens": 0,
+        "context_tokens": 0,
+        "cache_usage_fields": [],
+        "cache_usage_available": False,
+    }
+    if raw:
+        canonical = normalize_usage(raw, provider=provider, api_mode=api_mode)
+        cache_fields = cache_usage_field_paths(canonical.raw_usage)
+        row.update(
+            input_tokens=canonical.prompt_tokens,
+            uncached_input_tokens=canonical.input_tokens,
+            output_tokens=canonical.output_tokens,
+            cached_input_tokens=canonical.cache_read_tokens,
+            cache_write_tokens=canonical.cache_write_tokens,
+            context_tokens=canonical.prompt_tokens,
+            cache_usage_fields=cache_fields,
+            cache_usage_available=bool(cache_fields),
+        )
+    try:
+        return row, callback(row) if callable(callback) else None
+    except Exception:
+        logger.warning("Auxiliary usage observer callback failed", exc_info=True)
+        return row, None
+
+
+def new_usage_request_id() -> str:
+    """Create the identity shared by an auxiliary request's guard and usage row."""
+    return uuid.uuid4().hex

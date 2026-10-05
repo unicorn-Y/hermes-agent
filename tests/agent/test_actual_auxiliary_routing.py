@@ -218,6 +218,71 @@ def test_actual_background_tasks_reach_chat_completions(
     ] * 3
 
 
+def test_title_and_compression_share_request_ids_with_budget_hooks(
+    tmp_path, monkeypatch, actual_endpoint,
+):
+    from agent.context_compressor import ContextCompressor
+    from agent.title_generator import generate_title
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    base_url, requests = actual_endpoint
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = {
+        "model": {"provider": "actual", "default": "test-model", "base_url": base_url},
+        "auxiliary": {
+            task: {"provider": "actual", "model": "test-model", "base_url": base_url}
+            for task in ("title_generation", "compression")
+        },
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    runtime = resolve_runtime_provider(requested="actual")
+    runtime["model"] = "test-model"
+    reservations = {}
+    rows = []
+
+    def before_request(estimate, request_id):
+        assert estimate > 0
+        assert request_id not in reservations
+        reservations[request_id] = estimate
+        return False
+
+    def on_usage(row):
+        rows.append(row)
+        reservations.pop(row["request_id"])
+
+    def after_request(request_id):
+        reservations.pop(request_id, None)
+
+    runtime.update(
+        on_usage=on_usage,
+        before_provider_request=before_request,
+        after_provider_request=after_request,
+    )
+    assert generate_title("Check the background routing", timeout=5, main_runtime=runtime)
+    compressor = ContextCompressor(
+        model=runtime["model"], provider=runtime["provider"], api_key=runtime["api_key"],
+        base_url=runtime["base_url"], api_mode=runtime["api_mode"],
+        config_context_length=32768, quiet_mode=True,
+    )
+    compressor.set_summary_request_callback(
+        on_usage, before_request=before_request, after_request=after_request,
+    )
+    assert compressor._call_summary_llm("Summarize this conversation.", time.monotonic())
+    assert [row["purpose"] for row in rows] == ["title", "compression"]
+    assert all(row["request_id"] not in reservations for row in rows)
+    assert len({row["request_id"] for row in rows}) == 2
+    assert len(requests) == 2
+
+
+def test_cache_usage_fields_distinguish_absent_from_explicit_zero():
+    from agent.turn_usage import cache_usage_field_paths
+
+    assert cache_usage_field_paths({}) == []
+    assert cache_usage_field_paths({"prompt_tokens_details": {"cached_tokens": 0}}) == [
+        "prompt_tokens_details.cached_tokens",
+    ]
+
+
 @pytest.mark.parametrize(
     "provider,hosted",
     [

@@ -21,6 +21,7 @@ def test_agent_hooks_and_identity_are_public_constructor_options():
     ), 1000)[0] == ["You are Atlas."]
     assert DEFAULT_AGENT_IDENTITY.startswith("You are Hermes Agent")
     assert hooks.delegate_dispatcher is None
+    assert hooks.disable_provider_retries is False
 
 
 def test_credential_pool_constructor_option_preserves_default_and_forwards_value():
@@ -96,6 +97,27 @@ def test_before_model_hook_is_invoked_at_request_gate():
     agent = SimpleNamespace(hooks=AgentHooks(before_model_request=lambda: called.append(True) or True))
     assert _before_model_request(agent) is True
     assert called == [True]
+
+
+def test_before_provider_hook_receives_estimate_and_request_id():
+    from agent.conversation_loop import _before_provider_request
+
+    called = []
+    agent = SimpleNamespace(hooks=AgentHooks(
+        before_provider_request=lambda estimate, request_id: called.append((estimate, request_id)) or False,
+    ))
+    assert _before_provider_request(agent, 123, "turn-1:api:2") is False
+    assert called == [(123, "turn-1:api:2")]
+
+
+def test_before_provider_hook_exception_fails_closed():
+    from agent.conversation_loop import _before_provider_request
+
+    def fail(_estimate, _request_id):
+        raise RuntimeError("budget audit unavailable")
+
+    agent = SimpleNamespace(hooks=AgentHooks(before_provider_request=fail))
+    assert _before_provider_request(agent, 123, "turn-1:api:3") is True
 
 
 def test_title_hook_is_passed_to_auto_title_callback(monkeypatch):

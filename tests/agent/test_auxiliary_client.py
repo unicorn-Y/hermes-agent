@@ -2125,6 +2125,23 @@ class TestTransientTransportRetry:
         # Non-transient: single attempt, no same-target retry.
         assert client.chat.completions.create.call_count == 1
 
+    def test_run_budget_mode_stops_after_one_failed_send(self):
+        class _Timeout(Exception):
+            pass
+        _Timeout.__name__ = "APITimeoutError"
+
+        client = MagicMock()
+        client.base_url = "https://openrouter.ai/api/v1"
+        client.chat.completions.create.side_effect = _Timeout("unknown provider usage")
+        p1, p2, p3 = self._patches(client)
+        with p1, p2, p3, pytest.raises(_Timeout):
+            call_llm(
+                task="compression", messages=[{"role": "user", "content": "hi"}],
+                main_runtime={"disable_provider_retries": True},
+            )
+        assert client.chat.completions.create.call_count == 1
+        assert client.max_retries == 0
+
 
     def test_compression_skips_same_provider_retry_on_timeout(self):
         """A timeout on the critical compression path must NOT retry the same

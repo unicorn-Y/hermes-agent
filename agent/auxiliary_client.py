@@ -3106,6 +3106,7 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
         identity = normalized.get(identity_field)
         if isinstance(identity, str):
             normalized[identity_field] = identity.lower()
+    normalized["disable_provider_retries"] = bool(main_runtime.get("disable_provider_retries"))
     return normalized
 
 
@@ -8041,6 +8042,27 @@ def _plan_aux_call(
     return req, retry_kwargs, candidate_kwargs
 
 
+def _disable_aux_sdk_retries(client: Any) -> None:
+    """Force the already-resolved SDK transport to one attempt for a budgeted call."""
+    pending = [client]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in visited:
+            continue
+        visited.add(id(current))
+        if hasattr(current, "max_retries"):
+            try:
+                current.max_retries = 0
+            except (AttributeError, TypeError):
+                pass
+        attributes = getattr(current, "__dict__", {})
+        for name in ("_real_client", "_client", "client"):
+            nested = attributes.get(name) if isinstance(attributes, dict) else None
+            if nested is not None and nested is not current:
+                pending.append(nested)
+
+
 def _should_retry_same_provider(task: Optional[str], exc: Exception, tag: str) -> bool:
     """True when ``exc`` is a transient transport blip worth a same-provider retry; critical-path
     tasks skip it on a full-budget timeout (``_should_skip_same_provider_retry``) and go straight
@@ -8101,6 +8123,8 @@ def _call_llm_impl(
         extra_headers=extra_headers, api_mode=api_mode, route_info=route_info,
     )
     client, kwargs, request_provider = req.client, req.kwargs, req.request_provider
+    if retry_kwargs["main_runtime"].get("disable_provider_retries"):
+        _disable_aux_sdk_retries(client)
     # Streaming path (MoA aggregator): return the raw SDK stream, skipping validation and
     # the fallback chain (they assume a complete response); the caller owns reassembly/fallback.
     if stream:
@@ -8137,6 +8161,8 @@ def _call_llm_impl(
             task, **validate_kw,
         )
     try:
+        if retry_kwargs["main_runtime"].get("disable_provider_retries"):
+            return _primary(provider=request_provider, base_url=req.base_info)
         # Bounded same-provider retry (exponential backoff, auxiliary.transient_retries) for
         # transient blips before escalating to fallback — a dropped connection shouldn't
         # abandon a healthy provider (matters for pinned MoA advisors).
@@ -8161,6 +8187,8 @@ def _call_llm_impl(
                     _last_transient = retry_transient
             raise _last_transient
     except Exception as first_err:
+        if retry_kwargs["main_runtime"].get("disable_provider_retries"):
+            raise
         def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":
@@ -8283,7 +8311,11 @@ async def _async_call_llm_impl(
         extra_headers=None, api_mode=None, route_info=route_info,
     )
     client, kwargs, request_provider = req.client, req.kwargs, req.request_provider
+    if retry_kwargs["main_runtime"].get("disable_provider_retries"):
+        _disable_aux_sdk_retries(client)
     try:
+        if retry_kwargs["main_runtime"].get("disable_provider_retries"):
+            return await _primary(provider=request_provider, base_url=req.base_info)
         # Retry ONCE on the same provider for a transient blip before fallback (see call_llm()).
         # (PR #16587)
         _force_stream_async = _provider_requires_stream(request_provider, req.base_info or req.resolved_base_url)
@@ -8307,6 +8339,8 @@ async def _async_call_llm_impl(
                         "once on the same provider before fallback: %s", task or "call", transient_err)
             return await _primary()
     except Exception as first_err:
+        if retry_kwargs["main_runtime"].get("disable_provider_retries"):
+            raise
         async def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":

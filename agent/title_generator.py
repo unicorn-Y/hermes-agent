@@ -501,16 +501,35 @@ def generate_title(
     ):
         return None
     language = _title_language()
+    title_model = str(_title_config().get("model") or (main_runtime or {}).get("selected_model")
+                      or (main_runtime or {}).get("model") or "")
     # str.replace, not str.format: the prompt embeds literal JSON braces.
     prompt = _TITLE_PROMPT_TEMPLATE.replace(
         "__LANGUAGE_RULE__", _LANGUAGE_RULE_PINNED.format(language=language) if language else _LANGUAGE_RULE_MATCH_USER,
     )
+    request_attempted = False
+    usage_reported = False
+    request_id = None
+    _title_route = {}
     try:
         # Use the provider's default temperature instead of forcing 0.3.
         # Some models (e.g. GPT-5.6) only accept their server-side default
         # and reject explicit temperature values, causing the daemon title
         # thread to fail with "Unsupported value: 'temperature'".
         # See: #72351, #51083, #51157
+        from agent.turn_usage import new_usage_request_id
+        from agent.context_compressor import estimate_messages_tokens_rough
+
+        request_id = new_usage_request_id()
+        estimate = estimate_messages_tokens_rough([
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_snippet},
+        ])
+        before_request = (main_runtime or {}).get("before_provider_request")
+        if callable(before_request) and before_request(estimate, request_id):
+            logger.warning("Title generation skipped: run input-token budget reached")
+            return None
+        request_attempted = True
         response = call_llm(
             task="title_generation",
             messages=[{"role": "system", "content": prompt}, {"role": "user", "content": user_snippet}],
@@ -520,6 +539,7 @@ def generate_title(
             # replies that would have been garbage anyway. temperature=None: omitted from the wire so
             # default-only reasoning models accept the first request (#72351).
             max_tokens=TITLE_MAX_TOKENS, temperature=None, timeout=timeout, main_runtime=main_runtime,
+            route_info=_title_route,
             extra_body={"response_format": _TITLE_RESPONSE_FORMAT},
             # The module contract above promises thinking-disabled operation,
             # but nothing enforced it: with the aux default reasoning_effort
@@ -529,6 +549,17 @@ def generate_title(
             # ("```json") as the session title (#91927).
             reasoning_config={"enabled": False},
         )
+        from agent.turn_usage import report_auxiliary_usage
+
+        report_auxiliary_usage(
+            (main_runtime or {}).get("on_usage"), response, purpose="title",
+            model=title_model,
+            provider=str(_title_route.get("provider") or (main_runtime or {}).get("provider") or ""),
+            api_mode=str((main_runtime or {}).get("api_mode") or ""),
+            wire_model=str(_title_route.get("model") or (main_runtime or {}).get("model") or ""),
+            request_id=request_id,
+        )
+        usage_reported = True
         message = response.choices[0].message
         title = _clean_title(_extract_title_text(message.content or "") or _title_from_reasoning(message))
         # Answer-shaped output guard: titling is a 3-7 word task, so a title with many words is a model that
@@ -553,11 +584,26 @@ def generate_title(
             return None
         return title
     except Exception as e:
+        if request_attempted and not usage_reported:
+            from agent.turn_usage import report_auxiliary_usage
+
+            report_auxiliary_usage(
+                (main_runtime or {}).get("on_usage"), None, purpose="title",
+                model=title_model,
+                provider=str(_title_route.get("provider") or (main_runtime or {}).get("provider") or ""),
+                api_mode=str((main_runtime or {}).get("api_mode") or ""),
+                wire_model=str(_title_route.get("model") or (main_runtime or {}).get("model") or ""),
+                request_id=request_id,
+            )
         # WARNING so it shows in agent.log without debug mode; stack at debug.
         logger.warning("Title generation failed: %s", e)
         logger.debug("Title generation traceback", exc_info=True)
         _report_failure(failure_callback, e, "Title generation")
         return None
+    finally:
+        after_request = (main_runtime or {}).get("after_provider_request")
+        if request_attempted and request_id and callable(after_request):
+            after_request(request_id)
 
 
 def _has_upgraded_title(session_db, session_id: str) -> bool:

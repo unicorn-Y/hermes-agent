@@ -1504,6 +1504,18 @@ def _before_model_request(agent) -> bool:
     return bool(callback()) if callable(callback) else False
 
 
+def _before_provider_request(agent, estimated_input_tokens: int, request_id: str) -> bool:
+    """Ask an opt-in host budget guard before sending the assembled provider request."""
+    callback = getattr(getattr(agent, "hooks", None), "before_provider_request", None)
+    if not callable(callback):
+        return False
+    try:
+        return bool(callback(max(0, int(estimated_input_tokens or 0)), request_id))
+    except Exception:
+        logger.warning("before_provider_request hook failed; blocking provider request", exc_info=True)
+        return True
+
+
 def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
     """One API call with its retry/recovery loop (guard → build → call → check, error handlers).
 
@@ -1653,13 +1665,26 @@ def _run_conversation_turn(
             break
         if _pg.action == "continue":
             continue
+        s.api_request_id = agent._current_api_request_id = f"{s.turn_id}:api:{s.api_call_count}"
+        if _before_provider_request(agent, s.request_pressure_tokens, s.api_request_id):
+            agent.interrupt(hard_cancel=True)
+            break
         _run_phase(announce_api_call, agent, s)
 
         s.api_start_time, s.retry_count, s.max_retries = time.time(), 0, agent._api_max_retries
+        if getattr(getattr(agent, "hooks", None), "disable_provider_retries", False):
+            s.max_retries = 1
         s._retry, s.finish_reason, s.response, s.api_kwargs = TurnRetryState(), "stop", None, None
-        s.api_request_id = agent._current_api_request_id = f"{s.turn_id}:api:{s.api_call_count}"
 
-        early_result = _run_api_retry_loop(agent, s)
+        try:
+            early_result = _run_api_retry_loop(agent, s)
+        finally:
+            after_request = getattr(getattr(agent, "hooks", None), "after_provider_request", None)
+            if callable(after_request):
+                try:
+                    after_request(s.api_request_id)
+                except Exception:
+                    logger.warning("after_provider_request hook failed", exc_info=True)
         if early_result is not None:
             return early_result
 

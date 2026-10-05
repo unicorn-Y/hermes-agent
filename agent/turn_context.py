@@ -235,6 +235,16 @@ def _maybe_title_session_at_turn_start(
             k: getattr(agent, k, None)
             for k in ("model", "provider", "base_url", "api_key", "api_mode", "session_id")
         }
+        main_runtime["disable_provider_retries"] = bool(
+            getattr(getattr(agent, "hooks", None), "disable_provider_retries", False)
+        )
+        main_runtime["on_usage"] = getattr(getattr(agent, "hooks", None), "on_usage", None)
+        main_runtime["before_provider_request"] = getattr(
+            getattr(agent, "hooks", None), "before_provider_request", None,
+        )
+        main_runtime["after_provider_request"] = getattr(
+            getattr(agent, "hooks", None), "after_provider_request", None,
+        )
         # See #19027.
         upgrade = maybe_auto_title(
             session_db,
