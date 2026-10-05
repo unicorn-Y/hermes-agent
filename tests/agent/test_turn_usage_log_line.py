@@ -3,6 +3,7 @@ provider's response id, and the serving upstream when the route reports one. Exi
 prefix of the line, so the fields are appended and optional."""
 import logging
 from types import SimpleNamespace
+import pytest
 
 
 def _agent(tmp_path, monkeypatch):
@@ -50,6 +51,105 @@ def test_fields_are_omitted_when_absent(tmp_path, monkeypatch, caplog):
     finally:
         a.close()
     assert "write=" not in line and "id=" not in line and "upstream=" not in line
+
+
+@pytest.mark.parametrize(
+    "usage, expected_input, expected_output, available",
+    [
+        (None, None, None, False),
+        ({"completion_tokens": 7}, None, 7, False),
+        ({"prompt_tokens": 100}, 100, None, True),
+        ({"prompt_tokens": "100", "completion_tokens": 7}, None, 7, False),
+    ],
+)
+def test_main_usage_preserves_missing_raw_buckets(
+    tmp_path, monkeypatch, usage, expected_input, expected_output, available
+):
+    from agent import turn_usage
+
+    a = _agent(tmp_path, monkeypatch)
+    rows = []
+    monkeypatch.setattr(turn_usage, "_notify_usage", lambda _agent, row: rows.append(row))
+    try:
+        turn_usage.record_response_usage(
+            a, SimpleNamespace(usage=usage), messages=[{"role": "user", "content": "hi"}],
+            api_call_count=1, api_duration=0.2, compression_attempts=0, max_compression_attempts=3,
+        )
+    finally:
+        a.close()
+
+    assert rows[0]["input_tokens"] == expected_input
+    assert rows[0]["output_tokens"] == expected_output
+    assert rows[0]["usage_available"] is available
+    if expected_input is None:
+        assert rows[0]["context_tokens"] is None
+
+
+def test_main_typed_sdk_defaults_do_not_count_as_reported_fields(tmp_path, monkeypatch):
+    from agent import turn_usage
+
+    class TypedUsage:
+        input_tokens = 0
+        output_tokens = 7
+        model_fields_set = {"output_tokens"}
+
+    a = _agent(tmp_path, monkeypatch)
+    rows = []
+    monkeypatch.setattr(turn_usage, "_notify_usage", lambda _agent, row: rows.append(row))
+    try:
+        turn_usage.record_response_usage(
+            a, SimpleNamespace(usage=TypedUsage()), messages=[{"role": "user", "content": "hi"}],
+            api_call_count=1, api_duration=0.2, compression_attempts=0, max_compression_attempts=3,
+        )
+    finally:
+        a.close()
+
+    assert rows[0]["usage_available"] is False
+    assert rows[0]["input_tokens"] is None
+    assert rows[0]["output_tokens"] == 7
+
+
+def test_typed_sdk_cache_defaults_are_not_reported_cache_fields():
+    from agent.turn_usage import cache_usage_field_paths
+
+    class TypedCacheDetails:
+        cached_tokens = 0
+        model_fields_set = set()
+
+    class TypedUsage:
+        prompt_tokens = 100
+        completion_tokens = 7
+        prompt_tokens_details = TypedCacheDetails()
+        model_fields_set = {"prompt_tokens", "completion_tokens", "prompt_tokens_details"}
+
+    assert cache_usage_field_paths(TypedUsage()) == []
+
+    TypedUsage.prompt_tokens_details.model_fields_set = {"cached_tokens"}
+    assert cache_usage_field_paths(TypedUsage()) == ["prompt_tokens_details.cached_tokens"]
+
+
+@pytest.mark.parametrize(
+    "usage, expected_input, expected_output, available",
+    [
+        (None, None, None, False),
+        ({"completion_tokens": 7}, None, 7, False),
+        ({"prompt_tokens": 100}, 100, None, True),
+        ({"prompt_tokens": True, "completion_tokens": 7}, None, 7, False),
+    ],
+)
+def test_auxiliary_usage_preserves_missing_raw_buckets(usage, expected_input, expected_output, available):
+    from agent.turn_usage import report_auxiliary_usage
+
+    rows = []
+    row, _ = report_auxiliary_usage(
+        rows.append, {"usage": usage}, purpose="vision", model="m", provider="openai",
+        api_mode="chat_completions",
+    )
+
+    assert rows == [row]
+    assert row["input_tokens"] == expected_input
+    assert row["output_tokens"] == expected_output
+    assert row["usage_available"] is available
 
 
 def test_forensics_parser_reads_the_new_fields(tmp_path):

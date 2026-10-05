@@ -14,7 +14,7 @@ import logging
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 from agent.image_token_cost import calibrate_from_usage
 from agent.usage_anchor import capture_usage_anchor, set_usage_anchor
@@ -36,16 +36,52 @@ _CACHE_USAGE_PATHS = (
 
 def cache_usage_field_paths(raw_usage: Any) -> list[str]:
     """Return names of cache fields actually present, without retaining values."""
-    if not isinstance(raw_usage, dict):
-        return []
     present = []
     for path in _CACHE_USAGE_PATHS:
-        value: Any = raw_usage
-        for key in path:
-            value = value.get(key) if isinstance(value, dict) else None
-        if value is not None:
+        if _usage_path_present(raw_usage, path):
             present.append(".".join(path))
     return present
+
+
+def _usage_path_present(raw_usage: Any, path: tuple[str, ...]) -> bool:
+    """Check provider-reported field presence, excluding SDK model defaults."""
+    value = raw_usage
+    for key in path:
+        if isinstance(value, Mapping):
+            if key not in value:
+                return False
+            value = value[key]
+        else:
+            fields_set = getattr(value, "model_fields_set", None)
+            if fields_set is None:
+                fields_set = getattr(value, "__fields_set__", None)
+            if fields_set is not None and key not in fields_set:
+                return False
+            if not hasattr(value, key):
+                return False
+            value = getattr(value, key)
+        if value is None:
+            return False
+    return type(value) is int and value >= 0
+
+
+def _usage_bucket_presence(raw_usage: Any, *, provider: str = "", api_mode: str = "") -> tuple[bool, bool]:
+    """Return whether raw input and output counters were actually reported."""
+    provider_name = (provider or "").strip().lower()
+    mode = (api_mode or "").strip().lower()
+    if mode == "anthropic_messages" or provider_name == "anthropic":
+        input_paths = (("input_tokens",),)
+        output_paths = (("output_tokens",),)
+    elif mode == "codex_responses":
+        input_paths = (("input_tokens",),)
+        output_paths = (("output_tokens",),)
+    else:
+        input_paths = (("prompt_tokens",), ("input_tokens",))
+        output_paths = (("completion_tokens",), ("output_tokens",))
+    return (
+        any(_usage_path_present(raw_usage, path) for path in input_paths),
+        any(_usage_path_present(raw_usage, path) for path in output_paths),
+    )
 
 
 def _agent_session_source(agent: Any) -> str:
@@ -127,11 +163,11 @@ def record_response_usage(
             "purpose": getattr(agent, "_atlas_usage_purpose", "conversation"),
             "model": getattr(agent, "model", ""),
             "wire_model": getattr(agent, "model", ""),
-            "input_tokens": 0,
-            "output_tokens": 0,
+            "input_tokens": None,
+            "output_tokens": None,
             "cached_input_tokens": 0,
             "cache_write_tokens": 0,
-            "context_tokens": 0,
+            "context_tokens": None,
             "cache_usage_fields": [],
             "cache_usage_available": False,
             "request_count": 1,
@@ -161,23 +197,26 @@ def record_response_usage(
         "cache_write_tokens": canonical_usage.cache_write_tokens,
         "reasoning_tokens": canonical_usage.reasoning_tokens,
     }
-    cache_fields = cache_usage_field_paths(aggregator_usage.raw_usage)
+    input_available, output_available = _usage_bucket_presence(
+        response.usage, provider=agent.provider, api_mode=agent.api_mode
+    )
+    cache_fields = cache_usage_field_paths(response.usage)
     _notify_usage(agent, {
         "request_id": getattr(agent, "_current_api_request_id", None) or uuid.uuid4().hex,
         "purpose": getattr(agent, "_atlas_usage_purpose", "conversation"),
         "model": agent.model,
         "wire_model": getattr(agent, "model", ""),
-        "input_tokens": aggregator_usage.prompt_tokens,
-        "uncached_input_tokens": aggregator_usage.input_tokens,
-        "output_tokens": aggregator_usage.output_tokens,
+        "input_tokens": aggregator_usage.prompt_tokens if input_available else None,
+        "uncached_input_tokens": aggregator_usage.input_tokens if input_available else None,
+        "output_tokens": aggregator_usage.output_tokens if output_available else None,
         "cached_input_tokens": aggregator_usage.cache_read_tokens,
         "cache_write_tokens": aggregator_usage.cache_write_tokens,
-        "context_tokens": aggregator_usage.prompt_tokens,
+        "context_tokens": aggregator_usage.prompt_tokens if input_available else None,
         "context_limit": compressor.context_length,
         "cache_usage_fields": cache_fields,
         "cache_usage_available": bool(cache_fields),
         "request_count": 1,
-        "usage_available": True,
+        "usage_available": input_available,
         "request_sent": True,
     })
     # Capture the boundary latch before update_from_response() consumes it: only the real
@@ -382,33 +421,34 @@ def report_auxiliary_usage(
     a provider.
     """
     raw = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    input_available, output_available = _usage_bucket_presence(raw, provider=provider, api_mode=api_mode)
     row = {
         "request_id": request_id or uuid.uuid4().hex,
         "purpose": purpose,
         "model": model,
         "wire_model": wire_model or model,
         "request_count": 1,
-        "usage_available": bool(raw),
+        "usage_available": bool(raw) and input_available,
         "request_sent": response is not None,
-        "input_tokens": 0,
-        "uncached_input_tokens": 0,
-        "output_tokens": 0,
+        "input_tokens": None,
+        "uncached_input_tokens": None,
+        "output_tokens": None,
         "cached_input_tokens": 0,
         "cache_write_tokens": 0,
-        "context_tokens": 0,
+        "context_tokens": None,
         "cache_usage_fields": [],
         "cache_usage_available": False,
     }
     if raw:
         canonical = normalize_usage(raw, provider=provider, api_mode=api_mode)
-        cache_fields = cache_usage_field_paths(canonical.raw_usage)
+        cache_fields = cache_usage_field_paths(raw)
         row.update(
-            input_tokens=canonical.prompt_tokens,
-            uncached_input_tokens=canonical.input_tokens,
-            output_tokens=canonical.output_tokens,
+            input_tokens=canonical.prompt_tokens if input_available else None,
+            uncached_input_tokens=canonical.input_tokens if input_available else None,
+            output_tokens=canonical.output_tokens if output_available else None,
             cached_input_tokens=canonical.cache_read_tokens,
             cache_write_tokens=canonical.cache_write_tokens,
-            context_tokens=canonical.prompt_tokens,
+            context_tokens=canonical.prompt_tokens if input_available else None,
             cache_usage_fields=cache_fields,
             cache_usage_available=bool(cache_fields),
         )
