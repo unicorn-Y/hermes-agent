@@ -7,7 +7,7 @@ import pytest
 
 from agent.error_classifier import classify_api_error
 from agent.turn_api_error import settle_unrecovered_error
-from agent.turn_recovery_autorecover import ladder_wait_seconds
+from agent.turn_recovery_autorecover import ladder_notice, ladder_wait_seconds
 from agent.turn_retry_state import TurnRetryState
 
 
@@ -157,3 +157,22 @@ def test_interrupt_during_ladder_wait_returns_interrupted_result():
     verdict, retry = _settle(agent, _Err(503, "down"))
     assert verdict.action == "return" and verdict.result["interrupted"] is True
     assert retry.auto_recovery_cycles_used == 1
+
+
+def test_ladder_notice_names_endpoint_when_known():
+    """The retry line names the endpoint being retried so a stale base_url is visible on the
+    surface itself (Atlas desktop 2026-10-04: dead gateway domain was log-only)."""
+    agent = _Agent()
+    agent.base_url = "https://api.example.test/v1/"
+    agent.model = "openai/deepseek-v4.1-flash"
+    line = ladder_notice(agent, wait_s=16.0, cycle=1, total=5)
+    assert "(openai/deepseek-v4.1-flash via https://api.example.test/v1)" in line
+    assert "(cycle 1/5)" in line
+
+
+def test_ladder_notice_omits_endpoint_when_unknown():
+    agent = _Agent()
+    agent.base_url = ""
+    agent.model = ""
+    line = ladder_notice(agent, wait_s=16.0, cycle=1, total=5)
+    assert "via" not in line and "()" not in line

@@ -79,7 +79,13 @@ def ladder_eligible(agent: Any, classified: Any) -> bool:
 
 def ladder_notice(agent: Any, *, wait_s: float, cycle: int, total: int) -> str:
     hint = _STOP_HINTS.get(str(getattr(agent, "platform", "") or "").lower(), _DEFAULT_STOP_HINT)
-    text = f"⏳ Provider temporarily unavailable — retrying automatically in {wait_s:.0f}s (cycle {cycle}/{total})"
+    # Name the endpoint being retried: a stale/misconfigured base_url is otherwise
+    # invisible on user surfaces and only discoverable in engine logs.
+    base_url = str(getattr(agent, "base_url", "") or "").rstrip("/")
+    model = str(getattr(agent, "model", "") or "")
+    parts = [part for part in (model, base_url) if part and part != "unknown"]
+    endpoint = f" ({' via '.join(parts)})" if parts else ""
+    text = f"⏳ Provider temporarily unavailable{endpoint} — retrying automatically in {wait_s:.0f}s (cycle {cycle}/{total})"
     return f"{text}; {hint}" if hint else text
 
 
