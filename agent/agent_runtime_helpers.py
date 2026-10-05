@@ -1090,6 +1090,10 @@ def try_recover_primary_transport(
     """Rebuild the primary client once and retry after ``max_retries`` exhaust on a transient
     transport error. Skipped for aggregators (OpenRouter, Nous) that manage retries server-side."""
     error_type = type(api_error).__name__
+    if getattr(getattr(agent, "hooks", None), "disable_provider_retries", False):
+        # Budgeted runs send once: a hidden recovery re-send could double-bill a
+        # request whose usage is already unknown, so fail closed instead.
+        return False
     if agent._fallback_activated or error_type not in _TRANSIENT_TRANSPORT_ERRORS or agent._is_openrouter_url():
         return False
     # Portal OpenAI-wire traffic rides aggregator retry infra (skip), but Portal Claude on native
@@ -2008,6 +2012,8 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # (init, switch_model, recovery, restore, request-scoped); auxiliary_client builds its own clients and
     # keeps SDK retries because it is NOT wrapped by the conversation loop.
     client_kwargs.setdefault("max_retries", 0)
+    if getattr(getattr(agent, "hooks", None), "disable_provider_retries", False):
+        client_kwargs["max_retries"] = 0
     _ensure_copilot_headers(client_kwargs)
     # All primary construction and recovery paths must identify Hermes to the official Codex
     # endpoint, including snapshots with custom header overrides.
