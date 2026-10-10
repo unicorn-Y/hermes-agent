@@ -24,7 +24,11 @@ Defaults preserve Hermes behavior when the new public options are omitted.
 | `agent/turn_recovery_autorecover.py` | Name the model and endpoint in the auto-recovery retry notice so a stale or misconfigured gateway is visible on user surfaces, not only in engine logs. | `tests/agent/test_turn_recovery_autorecover.py::test_ladder_notice_names_endpoint_when_known`; `::test_ladder_notice_omits_endpoint_when_unknown` |
 | `pyproject.toml` | Align OpenAI 2.26.0 and Pydantic 2.13.5 pins with Atlas browser-use dependencies on Python 3.14. | Installed package metadata compatibility check (browser-use 0.13.10 requires the same exact versions), plus `tests/agent/test_atlas_hooks.py` public-constructor integration |
 
-Inventory reviewed against upstream `c8301ea6c9` for the H1R closeout. Earlier
+| `agent/context_compressor_summary.py` | An Atlas-selected compression model (`summary_model_id` set) sends its own provider, endpoint, key and API mode, so Hermes' auxiliary defaults cannot redirect it to the main endpoint. Moved here from `context_compressor.py` when upstream centralised summary routing in `_apply_summary_route` (2026-10-10 merge). | `core/tests/test_hermes_runtime_e2e.py` (compression model route) |
+
+Inventory reviewed against upstream `c8301ea6c9` for the H1R closeout, and re-checked
+after merging upstream `dce1e9b375` (rc.9-v0.21.7) on 2026-10-10: three conflicts
+(`context_compressor.py`, `conversation_loop.py`, one test), all patches kept. Earlier
 patches absorbed into upstream are not additional fork deltas. The fixed-date
 context-compressor test remains a known failure on the old fork as well; it has
 not been disabled or given a date workaround.
